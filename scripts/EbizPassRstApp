@@ -1,0 +1,565 @@
+#!/bin/ksh
+##############################################################################
+#             SCRIPT EbizPassRstApp                                          #
+#                                                                            #
+#Purpose:                                                                    #
+#       Reset apps, oracle_all, Sysadmin and weblogic user passwords         #
+##############################################################################
+SCRIPT_DIR=$HOME/EbizPassRst
+LOG_FILE=$SCRIPT_DIR/logs/"ebiz_db_pass_reset_"`date +%Y%m%d%H%M`".log"
+EC2_REGION=`aws ec2 describe-availability-zones --output text --query 'AvailabilityZones[0].[RegionName]'`
+
+##Function to Write LogFile
+function message
+{
+if [ ! -f ${LOG_FILE} ]; then
+touch ${LOG_FILE}
+fi
+TIME=`date`
+echo "$TIME :  ""$1" >> ${LOG_FILE}
+echo "$TIME :  ""$1"
+}
+
+##Function to Fetch the Passwords
+function fetch_password
+{
+
+#Read Secrets Manager Secret to fetch password
+PSPARAM=$(aws secretsmanager get-secret-value --secret-id R12-${CDB_NAME}-Secret --query SecretString --region $EC2_REGION | tr -d '"' | tr -d '{' | tr -d '}'| sed 's/\\:/|/g'|sed 's/\\//g'|cut -d'|' -f2)
+
+KEYPARAM=$(aws secretsmanager get-secret-value --secret-id R12-${CDB_NAME}-Secret --query SecretString --region $EC2_REGION | tr -d '"' | tr -d '{' | tr -d '}'| sed 's/\\:/|/g'|sed 's/\\//g'|cut -d'|' -f1)
+
+if [ ! ${PSPARAM} ]; then
+ message "ERROR: Failed to fetch passwords from secret R12-${CDB_NAME}-Secret. Check if the secret is created"
+ exit 11
+fi
+
+if [ ! ${KEYPARAM} ]; then
+ message "ERROR: Failed to fetch secret key from secret R12-${CDB_NAME}-Secret. Check if the secret is created"
+ exit 11
+fi
+
+SYSPASS=`echo ${PSPARAM}|cut -d":" -f1`
+
+if [ ! ${SYSPASS} ]; then
+  message "ERROR: Failed to fetch system password from secret R12-${CDB_NAME}-Secret. Add the password in first position in secret value restart this automation."
+  exit 11
+fi
+
+APPSPASS=`echo $PSPARAM|cut -d":" -f2`
+
+if [ ! ${APPSPASS} ]; then
+  message "ERROR: Failed to fetch apps password from secret R12-${CDB_NAME}-Secret. Add the password in 2nd position in secret value restart this automation."
+  exit 11
+fi
+
+SYSADMPASS=`echo $PSPARAM|cut -d":" -f3`
+
+if [ ! ${SYSADMPASS} ]; then
+  message "ERROR: Failed to fetch sysadmin password from secret R12-${CDB_NAME}-Secret. Add the password in 3rd position in secret value restart this automation."
+  exit 11
+fi
+
+WLSPASS=`echo $PSPARAM|cut -d":" -f4`
+
+if [ ! ${WLSPASS} ]; then
+  message "ERROR: Failed to fetch weblogic password from secret R12-${CDB_NAME}-Secret. Add the password in 4th position in secret value restart this automation."
+  exit 11
+fi
+
+}
+
+##Function to Update the Secret Parameter Store
+function update_pwd_pst()
+{
+POSTCNT=$((${2}+1))
+
+if [ ${2} -eq 1 ]; then
+PRECNT=${2}
+fi
+
+if [ ${2} -gt 1 ]; then
+PRECNT=$((${2}-1))
+fi
+
+PREPASS=`echo ${PSPARAM} | cut -d: -f1-${PRECNT}`
+POSTPASS=`echo ${PSPARAM} |cut -d: -f${POSTCNT}-`
+
+if [ ${2} -eq 1 ]; then
+  NEW_PSPARAM=`echo ${1}":"${POSTPASS}`
+elif [ ${2} -gt 1 ]; then
+  if [ ! ${POSTPASS} ]
+  then
+    NEW_PSPARAM=`echo ${PREPASS}":"${1}`
+  else
+    NEW_PSPARAM=`echo ${PREPASS}":"${1}":"${POSTPASS}`
+  fi
+fi
+
+aws secretsmanager put-secret-value --secret-id R12-${CDB_NAME}-Secret --region $EC2_REGION --secret-string "{\"${KEYPARAM}\":\"${NEW_PSPARAM}\"}"
+
+status_code=$?
+
+if [ $status_code -gt 0 ]; then
+    message "ERROR: Unable to update the secret R12-${CDB_NAME}-secret with the new password ${1} for the user ${3} in position ${2}."
+    exit 11
+fi
+
+message "SUCCESS: Updated the secret R12-${CDB_NAME}-Secret with the new password for the user ${3} in position ${2}."
+
+##Fetch the password again
+fetch_password
+
+
+}
+
+## Function to Stop Application
+function stop_apps
+{
+
+message "INFO: Stopping Application ${ENVNAME}."
+
+if [ -f apptab ]; then
+
+NODE=()
+while read line
+do
+ if [ `echo $line | grep -w ${ENVNAME} | wc -l` -gt 0 ]; then
+  NODE+=(`echo $line|cut -d":" -f3`)
+ fi
+done < apptab
+
+nodecount=${#NODE[*]}
+
+for ((i=$nodecount-1; i>=0; --i))
+do
+
+ssh -T applmgr@${NODE[$i]}<< EOF
+
+if [ -f ${SOURCEENVFILE} ]
+then
+
+. ${SOURCEENVFILE} run
+
+status_code=$?
+if [ $status_code -gt 0 ]; then
+message "ERROR: Unable to set environment for application $ORACLE_SID"
+exit 11
+fi
+else
+message "ERROR: Application $ORACLE_SID environment file does not exist in the ${SOURCEENVFILE}"
+exit 11
+fi
+{ echo apps; echo $APPSPASS; echo $WLSPASS; } | sh \$ADMIN_SCRIPTS_HOME/adstpall.sh -nopromptmsg
+
+## Sleep introduced to allow some processes to gracefully shutdown.
+sleep 30
+
+ps -ef|grep applmgr|grep -v grep |grep -v bash|grep -v sshd|grep -v ssh |grep -v "ps -ef"| grep -v EbizPass | awk '{print \$2}' | tr " " \n > /tmp/killproc
+
+while read prcs
+do
+kill -9 \$prcs
+done < /tmp/killproc
+
+EOF
+done
+
+message "INFO: Stopped Application $ENVNAME"
+
+else
+
+message "ERROR: apptab file does not exist, check if the file is copied from S3 bucket"
+exit 11
+
+fi
+
+}
+
+
+function start_apps
+{
+
+message "INFO: Starting Application ${ENVNAME}"
+
+
+if [ -f apptab ]; then
+
+NODE=()
+while read line
+do
+ if [ `echo $line | grep -w ${ENVNAME} | wc -l` -gt 0 ]; then
+  NODE+=(`echo $line|cut -d":" -f3`)
+ fi
+done < apptab
+
+nodecount=${#NODE[*]}
+
+for ((i=0; i<$nodecount; i++))
+do
+
+ssh -T applmgr@${NODE[$i]}<< EOF
+
+message "INFO: Starting Service on Node ${Node[$i]}"
+
+if [ -f ${SOURCEENVFILE} ]
+then
+
+. ${SOURCEENVFILE} run
+
+status_code=$?
+if [ $status_code -gt 0 ]; then
+message "ERROR: Unable to set environment for application $ENVFILE"
+exit 11
+fi
+else
+message "ERROR: Application $ENVFILE environment file does not exist in the ${SOURCEENVFILE}"
+exit 11
+fi
+{ echo apps; echo $APPSPASS; echo $WLSPASS; } | sh \$ADMIN_SCRIPTS_HOME/adstrtal.sh -nopromptmsg
+sleep 10
+
+EOF
+done
+message "INFO: Started Application $ENVNAME"
+
+else
+message "ERROR: apptab file does not exist, check if the file is copied from S3 bucket"
+exit 11
+
+fi
+
+}
+
+function start_autoconfig
+{
+
+message "INFO: Running Autoconfig on Application $ENVNAME"
+
+
+if [ -f apptab ]; then
+
+NODE=()
+while read line
+do
+ if [ `echo $line | grep -w ${ENVNAME} | wc -l` -gt 0 ]; then
+  NODE+=(`echo $line|cut -d":" -f3`)
+ fi
+done < apptab
+
+nodecount=${#NODE[*]}
+
+for ((i=$nodecount-1; i>=0; --i))
+do
+#for ((i=0; i<$nodecount; i++))
+#do
+
+message "INFO: Running Autoconfig on Node ${Node[$i]}"
+
+ssh -T applmgr@${NODE[$i]}<< EOF
+
+if [ -f ${SOURCEENVFILE} ]
+then
+
+. ${SOURCEENVFILE} run
+
+status_code=$?
+if [ $status_code -gt 0 ]; then
+message "ERROR: Unable to set environment for application $ENVNAME"
+exit 11
+fi
+else
+message "ERROR: Application $ENVNAME environment file ${SOURCEENVFILE} does not exist in node ${Node[$i]}"
+exit 11
+fi
+#set -x
+{ echo $APPSPASS; } | sh \$ADMIN_SCRIPTS_HOME/adautocfg.sh
+status_code=$?
+if [ $status_code -gt 0 ]; then
+message "ERROR: Failed to run autoconfig on node ${Node[$i]}"
+exit 11
+fi
+
+EOF
+done
+
+message "INFO: Completed Autoconfig on Application $ENVNAME"
+
+else
+
+message "ERROR: apptab file does not exist, check if the file is copied from S3 bucket"
+exit 11
+
+fi
+
+}
+
+
+function apps_passwordchange
+{
+set -x
+message "INFO: Changing Apps Password For Application $ENVNAME"
+
+#Generate New Random Password
+NEW_APPSPASS=`tr -cd  'A-Za-z' < /dev/urandom | fold -w3 | head -n1``tr -cd  '0-9' < /dev/urandom | fold -w1 | head -n1``tr -cd  '#_' < /dev/urandom | fold -w1 | head -n1``tr -cd  'A-Z' < /dev/urandom | fold -w1 | head -n1``tr -cd  '0-9' < /dev/urandom | fold -w1 | head -n1``tr -cd  'A-Za-z' < /dev/urandom | fold -w3 | head -n1`
+
+NEW_WLSPASS=`tr -cd  'A-Za-z' < /dev/urandom | fold -w3 | head -n1``tr -cd  '0-9' < /dev/urandom | fold -w1 | head -n1``tr -cd  '#_' < /dev/urandom | fold -w1 | head -n1``tr -cd  'A-Z' < /dev/urandom| fold -w1 | head -n1``tr -cd  '0-9' < /dev/urandom | fold -w1 | head -n1``tr -cd  'A-Za-z' < /dev/urandom | fold -w3 | head -n1`
+
+##Fetch Passwords
+fetch_password
+
+##Stop Application
+stop_apps
+
+FNDCPASS apps/${APPSPASS} 0 Y system/${SYSPASS} SYSTEM APPLSYS ${NEW_APPSPASS} &> /tmp/passchg.log
+status_code=$?
+if [ $status_code -gt 0 ]; then
+message "ERROR: Unable to reset apps password for application $ENVNAME"
+exit 11
+fi
+
+status_code=`grep -i ORA /tmp/passchg.log | wc -l`
+if [ $status_code -gt 0 ]; then
+message "ERROR: Unable to reset apps password for application $ENVNAME"
+exit 11
+fi
+
+message "INFO: Apps password Changed for ${ENVNAME}. Moving ahead to change ALLORACLE password."
+
+##Calling Function to Run Autoconfig
+start_autoconfig
+
+FNDCPASS apps/${NEW_APPSPASS} 0 Y system/${SYSPASS} ALLORACLE ${NEW_APPSPASS} &> /tmp/passchg.log
+status_code=$?
+if [ $status_code -gt 0 ]; then
+message "ERROR: Unable to reset apps password for application $ENVNAME"
+exit 11
+fi
+
+status_code=`grep -i ORA /tmp/passchg.log | wc -l`
+if [ $status_code -gt 0 ]; then
+message "ERROR: Unable to reset ALLORACLE password for application $ENVNAME"
+exit 11
+fi
+
+message "INFO: ALLORACLE password Changed for ${ENVNAME}. Moving ahead to update Apps password in weblogic datasource."
+
+update_pwd_pst ${NEW_APPSPASS} 2 APPS
+
+message "INFO: Update Password In EBS Domain for Application $ENVNAME"
+##Update Password In EBS Domain
+
+{ echo ${WLSPASS}; echo ${APPSPASS}; } | sh $ADMIN_SCRIPTS_HOME/adadminsrvctl.sh start
+status_code=$?
+if [ $status_code -gt 0 ]; then
+message "ERROR: Failed to start Admin Server After Apps Password Change For application $ENVNAME"
+exit 11
+fi
+
+{ echo ${WLSPASS}; echo ${APPSPASS}; } | perl $FND_TOP/patch/115/bin/txkManageDBConnectionPool.pl -options=updateDSPassword -contextfile=$CONTEXT_FILE
+status_code=$?
+if [ $status_code -gt 0 ]; then
+message "ERROR: Failed to update Password in WLS Datasource For Application $ENVNAME"
+exit 11
+fi
+
+message "INFO: Update Apps password in weblogic datasource. Moving ahead to change weblogic password."
+
+
+{ echo Yes; echo ${WLSPASS}; echo ${NEW_WLSPASS}; echo ${APPSPASS}; } | perl $FND_TOP/patch/115/bin/txkUpdateEBSDomain.pl -action=updateAdminPassword -contextfile=$CONTEXT_FILE
+status_code=$?
+if [ $status_code -gt 0 ]; then
+message "ERROR: Failed to update Password in Weblogic For Application $ENVNAME"
+exit 11
+fi
+
+message "INFO: Weblogic user password changed successfully for appliction ${ENVNAME}."
+
+update_pwd_pst ${NEW_WLSPASS} 4 WEBLOGIC
+
+
+#Start Application
+start_apps
+
+}
+
+
+function sysadmin_passwordchange
+{
+
+message "INFO: Changing Sysadmin Password For Application $ENVNAME"
+
+#Generate New Random Password
+NEW_SYSADMPASS=`tr -cd  'A-Za-z' < /dev/urandom | fold -w3 | head -n1``tr -cd  '0-9' < /dev/urandom | fold -w1 | head -n1``tr -cd  '#_' < /dev/urandom | fold -w1 | head -n1``tr -cd  'A-Z' < /dev/urandom| fold -w1 | head -n1``tr -cd  '0-9' < /dev/urandom | fold -w1 | head -n1``tr -cd  'A-Za-z' < /dev/urandom | fold -w3 | head -n1`
+
+##Fetch Passwords
+fetch_password
+
+FNDCPASS apps/${APPSPASS} 0 Y system/${SYSPASS} USER SYSADMIN ${NEW_SYSADMPASS} &> /tmp/passchg.log
+status_code=`grep -i ORA /tmp/passchg.log | wc -l`
+if [ $status_code -gt 0 ]; then
+message "ERROR: Unable to reset SYSADMIN password for application $ENVNAME"
+exit 11
+fi
+
+update_pwd_pst ${NEW_SYSADMPASS} 3 SYSADMIN 
+
+message "INFO: SYSADMIN user password changed successfully for appliction ${ENVNAME}."
+
+}
+
+function custapp_passwordchange
+{
+
+message "INFO: Changing custom application password For $ENVNAME"
+
+#Generate New Random Password
+NEW_CUSTPASS=`tr -cd  'A-Za-z' < /dev/urandom | fold -w3 | head -n1``tr -cd  '0-9' < /dev/urandom | fold -w1 | head -n1``tr -cd  '#_' < /dev/urandom | fold -w1 | head -n1``tr -cd  'A-Z' < /dev/urandom| fold -w1 | head -n1``tr -cd  '0-9' < /dev/urandom | fold -w1 | head -n1``tr -cd  'A-Za-z' < /dev/urandom | fold -w3 | head -n1`
+
+##Fetch Passwords
+fetch_password
+
+grep 'scope="CUSTOM"' $CONTEXT_FILE | cut -d'=' -f2|sed 's/scope//g'|cut -d'_' -f2|tr -d '"'| tr [:lower:] [:lower:]|grep `awk '{print $1"top"}'` $CONTEXT_FILE | cut -d'=' -f1|sed 's/oa_var//g'|cut -d'<' -f2 > custtop
+set -x
+while read top
+do
+cust_user=`sqlplus -s apps/${APPSPASS} << EOF
+set heading off
+set feedback off
+set echo off
+whenever sqlerror exit 4
+whenever oserror exit 1
+select distinct oracle_username from fnd_oracle_userid where oracle_id in ( select application_id from fnd_application where basepath='${top}');
+exit;
+EOF`
+status_code=$?
+if [ $status_code -gt 0 ]; then
+   message "ERROR: Failed to fetch custom application user detail for application ${ENVNAME}"
+   exit 11
+fi
+
+FNDCPASS apps/${APPSPASS} 0 Y system/${SYSPASS} ORACLE $cust_user ${NEW_CUSTPASS} &> /tmp/passchg.log
+status_code=`grep -i ORA /tmp/passchg.log | wc -l`
+if [ $status_code -gt 0 ]; then
+message "ERROR: Unable to reset xxc password for application $ENVNAME"
+exit 11
+fi
+
+essage "INFO: ${NEW_CUSTPASS} user password changed successfully for appliction ${ENVNAME}."
+
+done < custtop
+
+update_pwd_pst ${NEW_CUSTPASS} 6 CUSTOM_APPLICATION 
+
+}
+
+USAGE="EbizPassRstApp -target_inst <INSTANCE_NAME> -scope <APPS/SYSADMIN/CUSTOM/ALL>"
+
+if [ "$1" == "" ] || [ "$2" == "" ] || [ "$3" == "" ] || [ "$4" == "" ]; then
+   message "ERROR: Not all arguments are passed"
+   message "Usage is: $USAGE"
+   exit 11
+fi
+
+while [ "$1" != "" ]; do
+    case $1 in
+       -target_inst)          ENVNAME=$2; shift 2;;
+       -scope)                SCOPE=$2; shift 2;;
+        *)                    message "ERROR: Invalid argument ($1).... exiting."; exit 11;;
+    esac
+done
+
+APPTAB=`aws ssm get-parameter --name ERP-apptab --with-decryption --query "Parameter.Value" --region $EC2_REGION|tr -d '"'`
+if [ -z ${APPTAB} ]; then
+  message "ERROR: Failed to read value from ERP-apptab parameter store. Check if Paramter store exists."
+  exit 11
+fi
+
+if [ `echo $APPTAB | grep -w ${ENVNAME} | wc -l` -eq 0 ]; then
+  message "ERROR: ERP-apptab Parameter store does not have entry about ERPDEV environment"
+  exit 11
+fi
+
+if [ ! -f apptab ]; then
+  touch apptab
+else
+  rm apptab
+touch apptab
+fi
+
+aws ssm get-parameter --name ERP-apptab --with-decryption --query "Parameter.Value" --region $EC2_REGION|tr -d '"'|sed 's/\\n/\n/g'|sed 's/\\$//g'> tmpfile
+
+while read line
+do
+  if [ `echo $line|cut -d":" -f2|grep -w ${ENVNAME}|wc -l` -gt 0 ]; then
+   V1=`echo $line|cut -d":" -f1`
+    if [ ! ${V1} ]; then
+     message "ERROR: ERP-apptab Parameterstore does not have value for CDB in first position. If this is a non Containeraized databasse then enter DB name in first position and rerun the automation."
+     exit 11
+    fi
+   V2=`echo $line|cut -d":" -f2`
+    if [ ! ${V2} ]; then
+     message "ERROR: ERP-apptab Parameterstore does not have value for PDB in second position. If this is a non Containeraized databasse then enter DB name in second position and rerun the automation."
+     exit 11
+    fi
+   V3=`echo $line|cut -d":" -f3`
+    if [ ! ${V3} ]; then
+     message "ERROR: ERP-apptab Parameterstore does not have value for logical application hostname in third position and rerun the automation."
+     exit 11
+    fi
+   V4=`echo $line|cut -d":" -f4`
+    if [ ! ${V4} ]; then
+     message "ERROR: ERP-apptab Parameterstore does not have value for application base path in fourth position and rerun the automation."
+     exit 11
+    fi
+   echo $V1":"$V2":"$V3":"$V4 >> apptab
+  fi
+done < tmpfile
+rm tmpfile
+
+##Validating apptab file and fetching ORACLE_SID and PDB_NAME
+
+if [ -f apptab ]; then
+
+  CDB_NAME=`cat apptab | grep -w ${ENVNAME} |tail -1 | cut -d':' -f1`
+
+  SOURCE_BASE_PATH=`cat apptab | grep -w ${ENVNAME} |tail -1 | cut -d':' -f4`
+    if [ ${SOURCE_BASE_PATH} ]; then
+      SOURCEENVFILE=${SOURCE_BASE_PATH}/EBSapps.env
+    else
+      message "ERROR: apptab file does not have complete details of ${ENVNAME}"
+      exit 11
+    fi
+else
+ message "ERROR: apptab file does not exist, check if the file is copied from S3 bucket"
+ exit 11
+fi
+
+if [ -f ${SOURCEENVFILE} ]
+then
+  . ${SOURCEENVFILE} run
+  status_code=$?
+  if [ $status_code -gt 0 ]; then
+      message "ERROR: Unable to set environment for application ${ENVNAME}"
+      exit 11
+  fi
+else
+  message "ERROR: Application ${ENVNAME} environment file does not exist in the ${SOURCEENVFILE}"
+  exit 11
+fi
+
+##Fetch Passwords
+fetch_password
+
+
+case "$SCOPE" in
+      APPS)       apps_passwordchange;;
+      SYSADMIN)   sysadmin_passwordchange;;
+      CUSTOM)     custapp_passwordchange;;
+      ALL)        apps_passwordchange
+                  sysadmin_passwordchange
+                  custapp_passwordchange;;
+
+esac
+
+exit 0

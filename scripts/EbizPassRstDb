@@ -1,0 +1,359 @@
+#!/bin/ksh
+##############################################################################
+#             SCRIPT EbizPassRstDb                                           #
+#                                                                            #
+#Purpose:                                                                    #
+#       Reset sys, system and ebs_system user passwords                      #
+##############################################################################
+SCRIPT_DIR=$HOME/EbizPassRst
+LOG_FILE=$SCRIPT_DIR/logs/"ebiz_db_pass_reset_"`date +%Y%m%d%H%M`".log"
+EC2_REGION=`aws ec2 describe-availability-zones --output text --query 'AvailabilityZones[0].[RegionName]'`
+
+##Function to Write LogFile
+function message
+{
+if [ ! -f ${LOG_FILE} ]; then
+touch ${LOG_FILE}
+fi
+TIME=`date`
+echo "$TIME :  ""$1" >> ${LOG_FILE}
+echo "$TIME :  ""$1"
+}
+
+##Function to Fetch Password
+
+function fetch_password
+{
+
+#Read Secrets Manager Secret to fetch password
+PSPARAM=$(aws secretsmanager get-secret-value --secret-id R12-${ORACLE_SID}-Secret --query SecretString --region $EC2_REGION | tr -d '"' | tr -d '{' | tr -d '}'| sed 's/\\:/|/g'|sed 's/\\//g'|cut -d'|' -f2)
+
+KEYPARAM=$(aws secretsmanager get-secret-value --secret-id R12-${ORACLE_SID}-Secret --query SecretString --region $EC2_REGION | tr -d '"' | tr -d '{' | tr -d '}'| sed 's/\\:/|/g'|sed 's/\\//g'|cut -d'|' -f1)
+
+if [ ! ${PSPARAM} ]; then
+ message "ERROR: Failed to fetch passwords from secret R12-${ORACLE_SID}-Secret. Check if the secret is created"
+ exit 11
+fi
+
+if [ ! ${KEYPARAM} ]; then
+ message "ERROR: Failed to fetch secret key from secret R12-${ORACLE_SID}-Secret. Check if the secret is created"
+ exit 11
+fi
+
+SYSPASS=`echo ${PSPARAM}|cut -d":" -f1`
+
+if [ ! ${SYSPASS} ]; then
+  message "ERROR: Failed to fetch system password from secret R12-${ORACLE_SID}-Secret. Add the password in first position in secret value restart this automation."
+  exit 11
+fi
+
+}
+
+##Function to Update the Secret Parameter Store
+function update_pwd_pst()
+{
+
+#Fetch Password
+fetch_password
+
+POSTCNT=$((${2}+1))
+
+if [ ${2} -eq 1 ]; then
+PRECNT=${2}
+fi
+
+if [ ${2} -gt 1 ]; then
+PRECNT=$((${2}-1))
+fi
+
+PREPASS=`echo ${PSPARAM} | cut -d: -f1-${PRECNT}`
+POSTPASS=`echo ${PSPARAM} |cut -d: -f${POSTCNT}-`
+
+if [ ${2} -eq 1 ]; then
+  NEW_PSPARAM=`echo ${1}":"${POSTPASS}`
+elif [ ${2} -gt 1 ]; then
+  if [ ! ${POSTPASS} ]
+  then
+    NEW_PSPARAM=`echo ${PREPASS}":"${1}`
+  else
+    NEW_PSPARAM=`echo ${PREPASS}":"${1}":"${POSTPASS}`
+  fi
+fi
+
+
+aws secretsmanager put-secret-value --secret-id R12-${ORACLE_SID}-Secret --region $EC2_REGION --secret-string "{\"${KEYPARAM}\":\"${NEW_PSPARAM}\"}"
+
+status_code=$?
+
+if [ $status_code -gt 0 ]; then
+    message "ERROR: Unable to update the secret R12-${ORACLE_SID}-Secret with the new password ${1} for the user ${3} in position ${2}."
+    exit 11
+fi
+
+message "SUCCESS: Updated the secret R12-${ORACLE_SID}-Secret with the new password for the user ${3} in position ${2}."
+
+}
+
+USAGE="EbizPassRstDb -target_inst <INSTANCE_NAME>"
+
+if [ "$1" == "" ] || [ "$2" == "" ]; then
+   message "ERROR: Not all arguments are passed"
+   message "Usage is: $USAGE"
+   exit 11
+fi
+
+
+while [ "$1" != "" ]; do
+    case $1 in
+       -target_inst)          ENVNAME=$2; shift 2;;
+        *)                    message "ERROR: Invalid argument ($1).... exiting."; exit 11;;
+    esac
+done
+
+
+APPTAB=`aws ssm get-parameter --name ERP-apptab --with-decryption --query "Parameter.Value" --region $EC2_REGION|tr -d '"'`
+if [ -z ${APPTAB} ]; then
+  message "ERROR: Failed to read value from ERP-apptab parameter store. Check if Paramter store exists."
+  exit 11
+fi
+
+if [ `echo $APPTAB | grep -w ${ENVNAME} | wc -l` -eq 0 ]; then
+  message "ERROR: ERP-apptab Parameter store does not have entry about ERPDEV environment"
+  exit 11
+fi
+     
+if [ ! -f apptab ]; then
+  touch apptab
+else
+  rm apptab
+touch apptab
+fi
+   
+aws ssm get-parameter --name ERP-apptab --with-decryption --query "Parameter.Value" --region $EC2_REGION|tr -d '"'|sed 's/\\n/\n/g'|sed 's/\\$//g'> tmpfile
+     
+while read line
+do
+  if [ `echo $line|cut -d":" -f2|grep -w ${ENVNAME}|wc -l` -gt 0 ]; then
+   V1=`echo $line|cut -d":" -f1`
+    if [ ! ${V1} ]; then
+     message "ERROR: ERP-apptab Parameterstore does not have value for CDB in first position. If this is a non Containeraized databasse then enter DB name in first position and rerun the automation."
+     exit 11
+    fi
+   V2=`echo $line|cut -d":" -f2`
+    if [ ! ${V2} ]; then
+     message "ERROR: ERP-apptab Parameterstore does not have value for PDB in second position. If this is a non Containeraized databasse then enter DB name in second position and rerun the automation."
+     exit 11
+    fi
+   V3=`echo $line|cut -d":" -f3`
+    if [ ! ${V3} ]; then
+     message "ERROR: ERP-apptab Parameterstore does not have value for logical application hostname in third position and rerun the automation."
+     exit 11
+    fi
+   V4=`echo $line|cut -d":" -f4`
+    if [ ! ${V4} ]; then
+     message "ERROR: ERP-apptab Parameterstore does not have value for application base path in fourth position and rerun the automation."
+     exit 11
+    fi
+   echo $V1":"$V2":"$V3":"$V4 >> apptab
+  fi
+ done < tmpfile
+ rm tmpfile
+
+ ##Validating apptab file and fetching ORACLE_SID and PDB_NAME
+
+ if [ -f apptab ]; then
+    ORACLE_SID=`cat apptab | grep -w ${ENVNAME} |tail -1 | cut -d':' -f1`
+    PDB_NAME=`cat apptab | grep -w ${ENVNAME} | tail -1 | cut -d ':' -f2`
+
+   ## Setting Oracle environment.
+   if [ `cat /etc/oratab | grep -w $ORACLE_SID | wc -l` -gt 0 ]
+   then
+     ORAENV_ASK=NO
+     . oraenv -s
+     status_code=$?
+     if [ $status_code -gt 0 ]; then
+       message "ERROR: Unable to set environment for databse ${ORACLE_SID}."
+       exit 11
+     fi
+   else
+    message "ERROR: Database $ORACLE_SID entry does not exist in oratab. Rerun this automation after fixing this."
+    exit 11
+   fi
+else
+   message "ERROR: apptab file does not exist, check if the file is present in ${SCRIPT_DIR}"
+   exit 11
+fi
+
+DATABASE="V\$DATABASE"
+CDB_CHK=`sqlplus -s / as sysdba <<SOF
+         set heading off
+         set feedback off
+         set echo off
+         whenever sqlerror exit 4
+         whenever oserror exit 1
+         select CDB from ${DATABASE};
+         exit
+SOF`
+
+status_code=$?
+
+if [ $status_code -gt 0 ]; then
+    message "ERROR: Unable to query the database to check if it is a CDB."
+    exit 11
+fi
+
+#Check if EBS_SYSTEM User Exist
+
+if [ $CDB_CHK == "YES" ]; then
+CHK_EBS_SYSTEM=`sqlplus -s / as sysdba <<SOF
+         set heading off
+         set feedback off
+         set echo off
+         whenever sqlerror exit 4
+         whenever oserror exit 1
+         ALTER SESSION SET CONTAINER = ${PDB_NAME};
+         select 'Y' from dba_users
+         where username = 'EBS_SYSTEM';
+         exit
+SOF`
+
+status_code=$?
+
+if [ $status_code -gt 0 ]; then
+    message "ERROR: Unable to query the database to check if EBS_SYSTEM user exists."
+    exit 11
+fi
+else
+CHK_EBS_SYSTEM=`sqlplus -s / as sysdba <<SOF
+         set heading off
+         set feedback off
+         set echo off
+         whenever sqlerror exit 4
+         whenever oserror exit 1
+         select 'Y' from dba_users
+         where username = 'EBS_SYSTEM';
+         exit
+SOF`
+
+status_code=$?
+
+if [ $status_code -gt 0 ]; then
+    message "ERROR: Unable to query the database to check if EBS_SYSTEM user exists."
+    exit 11
+fi
+
+fi
+
+set -x
+
+#Fetch Password
+fetch_password
+
+#Generate New Random Password for system user
+NEW_SYSPASS=`tr -cd  'A-Za-z' < /dev/urandom | fold -w3 | head -n1``tr -cd  '0-9' < /dev/urandom | fold -w1 | head -n1``tr -cd  '#_' < /dev/urandom | fold -w1 | head -n1``tr -cd  'A-Z' < /dev/urandom | fold -w1 | head -n1``tr -cd  '0-9' < /dev/urandom | fold -w1 | head -n1``tr -cd  'A-Za-z' < /dev/urandom | fold -w3 | head -n1`
+
+#Generate New Random Password for ebs_system user
+NEW_EBSSYSPASS=`tr -cd  'A-Za-z' < /dev/urandom | fold -w3 | head -n1``tr -cd  '0-9' < /dev/urandom | fold -w1 | head -n1``tr -cd  '#_' < /dev/urandom | fold -w1 | head -n1``tr -cd  'A-Z' < /dev/urandom | fold -w1 | head -n1``tr -cd  '0-9' < /dev/urandom | fold -w1 | head -n1``tr -cd  'A-Za-z' < /dev/urandom | fold -w3 | head -n1`
+
+if [ $CDB_CHK == "YES" ]; then
+sqlplus -s / as sysdba << EOF
+WHENEVER OSERROR EXIT 68;
+WHENEVER SQLERROR EXIT SQL.SQLCODE;
+ALTER USER SYS IDENTIFIED BY ${NEW_SYSPASS};
+ALTER USER SYSTEM IDENTIFIED BY ${NEW_SYSPASS};
+
+declare
+  l_usr_cnt pls_integer := 0;
+  l_sql varchar2(32767);
+begin
+  EXECUTE IMMEDIATE 'ALTER SESSION SET CONTAINER = ${PDB_NAME}';
+  l_sql := 'ALTER USER EBS_SYSTEM IDENTIFIED BY ${NEW_EBSSYSPASS}';
+
+  select count(1)
+  into l_usr_cnt
+  from dba_users
+  where username = 'EBS_SYSTEM';
+
+    --Reset EBS_SYSTEM password if user exist.
+  if (l_usr_cnt > 0) then
+    execute immediate l_sql;
+  end if;
+
+end;
+/
+
+EOF
+
+status_code=$?
+
+if [ $status_code -gt 0 ]; then
+    message "ERROR: Failed to reset system/sys password with new password ${NEW_SYSPASS}."
+    exit 11
+fi
+
+else
+
+sqlplus -s / as sysdba << EOF
+WHENEVER OSERROR EXIT 68;
+WHENEVER SQLERROR EXIT SQL.SQLCODE;
+ALTER USER SYS IDENTIFIED BY ${NEW_SYSPASS};
+ALTER USER SYSTEM IDENTIFIED BY {NEW_SYSPASS};
+
+declare
+  l_usr_cnt pls_integer := 0;
+  l_sql varchar2(32767);
+begin
+  l_sql := 'ALTER USER EBS_SYSTEM IDENTIFIED BY ${NEW_EBSSYSPASS}';
+
+  select count(1)
+  into l_usr_cnt
+  from dba_users
+  where username = 'EBS_SYSTEM';
+
+    --Reset EBS_SYSTEM password if user exist.
+  if (l_usr_cnt > 0) then
+    execute immediate l_sql;
+  end if;
+
+end;
+/
+
+EOF
+
+status_code=$?
+
+if [ $status_code -gt 0 ]; then
+    message "ERROR: Failed to reset system/sys password with new password ${NEW_SYSPASS}."
+    exit 11
+fi
+
+fi
+
+
+# Calling ParameterStore Password Update Function
+update_pwd_pst $NEW_SYSPASS 1 SYS
+
+if [ ${CHK_EBS_SYSTEM} == 'Y' ]; then
+update_pwd_pst $NEW_EBSSYSPASS 5 EBS_SYSTEM
+else
+NEW_EBSSYSPASS=DUMMY
+update_pwd_pst $NEW_EBSSYSPASS 5 EBS_SYSTEM
+fi
+
+if [ -f ${ORACLE_HOME}/dbs/orapw${ORACLE_SID} ]
+then
+echo ${NEW_SYSPASS} | ${ORACLE_HOME}/bin/orapwd file=${ORACLE_HOME}/dbs/orapw${ORACLE_SID} force=y
+else
+echo ${NEW_SYSPASS} | ${ORACLE_HOME}/bin/orapwd file=${ORACLE_HOME}/dbs/orapw${ORACLE_SID}
+fi
+
+status_code=$?
+
+if [ $status_code -gt 0 ]; then
+    message "ERROR: Failed to generate password file ${ORACLE_HOME}/dbs/orapw${ORACLE_SID} for sys user with new password ${NEW_SYSPASS}."
+    exit 11
+fi
+
+message "Success: Sys and System password changed. If Standby database is configuired, copy the file ${ORACLE_HOME}/dbs/orapw${ORACLE_SID} to target server"
+
+exit 0

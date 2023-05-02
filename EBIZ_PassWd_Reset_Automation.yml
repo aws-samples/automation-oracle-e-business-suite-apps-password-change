@@ -1,0 +1,184 @@
+description: |-
+  # Oracle E-Business Suite R12.2 Automated Administrative User Password Reset
+
+  The automation would handle the password reset process of the below users
+  * sys 
+  * system 
+  * apps 
+  * oracle All 
+  * sysadmin 
+  * weblogic
+  * ebs_system
+   
+  ## Important Note:
+  1) This process will **stop** application services when password change scope is selected as All or Apps/Weblogic. This will introduce downtime, hence execute this automation with apprioriate communications.
+
+  2) Oracle database password file is regenerated as part of sys password reset. Ensure to copy the newly generated password file to the standby database server.
+
+  You can create a [link to another webpage](${ AWS_ENDPOINT }).
+schemaVersion: '0.3'
+parameters:
+  EBIZEnvName:
+    type: String
+    description: Name of the E-Business Suite environment for which password should be reset.
+  EBIZDbNodeName:
+    type: String
+    description: E-Business Suite database EC2 instance value of tag key Name.
+  EBIZDbOsUser:
+    type: String
+    description: E-Business Suite Database OS user
+  EBIZAppNodeName:
+    type: String
+    description: E-Business Suite application EC2 instance value of tag key Name.
+  EBIZAppOsUser:
+    type: String
+    description: E-Business Suite Application OS user
+  PasswordChangeScope:
+    type: String
+    allowedValues:
+      - DB
+      - Apps/Weblogic
+      - Sysadmin
+      - Custom
+      - All
+    description: 'Password Change Scope - DB for sys,system and ebs_system, Apps  for apps, oracle all, sysadmin, weblogic'
+  S3RepoBucketName:
+    type: String
+    description: S3 Bucket where scripts are stored
+mainSteps:
+  - name: EBIZ_Chk_PasswordChangeScope01
+    action: 'aws:branch'
+    inputs:
+      Choices:
+        - NextStep: EBIZ_RESET_DB_PASSWORD
+          Variable: '{{ PasswordChangeScope }}'
+          StringEquals: DB
+        - NextStep: EBIZ_RESET_APPWLS_PASSWORD
+          Variable: '{{ PasswordChangeScope }}'
+          StringEquals: Apps/Weblogic
+        - NextStep: EBIZ_RESET_SYSADMIN_PASSWORD
+          Variable: '{{ PasswordChangeScope }}'
+          StringEquals: Sysadmin
+        - NextStep: EBIZ_RESET_CUSTOM_PASSWORD
+          Variable: '{{ PasswordChangeScope }}'
+          StringEquals: Custom
+        - NextStep: EBIZ_RESET_DB_PASSWORD
+          Variable: '{{ PasswordChangeScope }}'
+          StringEquals: All
+    description: Check the scope of password change.
+    timeoutSeconds: 600
+    nextStep: EBIZ_Chk_PasswordChangeScope02
+  - name: EBIZ_RESET_DB_PASSWORD
+    action: 'aws:runCommand'
+    inputs:
+      DocumentName: AWS-RunShellScript
+      Parameters:
+        commands: 'runuser -l {{EBIZDbOsUser}} -c ''if [ ! -d EbizPassRst ]; then mkdir EbizPassRst; fi; cd EbizPassRst;if [ ! -d logs ]; then mkdir logs;  fi; aws s3 cp s3://{{S3RepoBucketName}}/scripts/EbizPassRstDb . 2>&1 > /dev/null; if [ $? -gt 0 ]; then exit 11;fi; sh EbizPassRstDb -target_inst {{EBIZEnvName}}'''
+      Targets:
+        - Key: 'tag:Name'
+          Values:
+            - '{{ EBIZDbNodeName }}'
+      CloudWatchOutputConfig:
+        CloudWatchOutputEnabled: true
+        CloudWatchLogGroupName: EBIZPassWdResetAutomationLogs
+    timeoutSeconds: 900
+    description: ''
+  - name: EBIZ_Chk_PasswordChangeScope02
+    action: 'aws:branch'
+    inputs:
+      Choices:
+        - NextStep: EBIZ_RESET_APPWLS_PASSWORD
+          Variable: '{{ PasswordChangeScope }}'
+          StringEquals: All
+        - NextStep: EBIZ_RESET_APPWLS_PASSWORD
+          Variable: '{{ PasswordChangeScope }}'
+          StringEquals: Apps/Weblogic
+        - NextStep: EBIZ_RESET_SYSADMIN_PASSWORD
+          Variable: '{{ PasswordChangeScope }}'
+          StringEquals: Sysadmin
+        - NextStep: EBIZ_RESET_CUSTOM_PASSWORD
+          Variable: '{{ PasswordChangeScope }}'
+          StringEquals: Custom
+    description: Check the scope of password change.
+    timeoutSeconds: 600
+    nextStep: EBIZ_Chk_PasswordChangeScope03
+  - name: EBIZ_RESET_APPWLS_PASSWORD
+    action: 'aws:runCommand'
+    inputs:
+      DocumentName: AWS-RunShellScript
+      Targets:
+        - Key: 'tag:Name'
+          Values:
+            - '{{ EBIZAppNodeName }}'
+      CloudWatchOutputConfig:
+        CloudWatchOutputEnabled: true
+        CloudWatchLogGroupName: EBIZPassWdResetAutomationLogs
+      Parameters:
+        commands: 'runuser -l {{EBIZAppOsUser}} -c ''if [ ! -d EbizPassRst ]; then mkdir EbizPassRst; fi; cd EbizPassRst;if [ ! -d logs ]; then mkdir logs;  fi; aws s3 cp s3://{{S3RepoBucketName}}/scripts/EbizPassRstApp . 2>&1 > /dev/null; if [ $? -gt 0 ]; then exit 11;fi; sh EbizPassRstApp -target_inst {{EBIZEnvName}} -scope APPS'''
+    timeoutSeconds: 3600
+  - name: EBIZ_Chk_PasswordChangeScope03
+    action: 'aws:branch'
+    inputs:
+      Choices:
+        - NextStep: EBIZ_RESET_SYSADMIN_PASSWORD
+          Variable: '{{ PasswordChangeScope }}'
+          StringEquals: All
+        - NextStep: EBIZ_RESET_SYSADMIN_PASSWORD
+          Variable: '{{ PasswordChangeScope }}'
+          StringEquals: Sysadmin
+        - NextStep: EBIZ_RESET_CUSTOM_PASSWORD
+          Variable: '{{ PasswordChangeScope }}'
+          StringEquals: Custom
+    description: Check the scope of password change.
+    timeoutSeconds: 900
+    nextStep: EBIZ_Chk_PasswordChangeScope04
+  - name: EBIZ_RESET_SYSADMIN_PASSWORD
+    action: 'aws:runCommand'
+    inputs:
+      DocumentName: AWS-RunShellScript
+      Targets:
+        - Key: 'tag:Name'
+          Values:
+            - '{{ EBIZAppNodeName }}'
+      CloudWatchOutputConfig:
+        CloudWatchOutputEnabled: true
+        CloudWatchLogGroupName: EBIZPassWdResetAutomationLogs
+      Parameters:
+        commands: 'runuser -l {{EBIZAppOsUser}} -c ''if [ ! -d EbizPassRst ]; then mkdir EbizPassRst; fi; cd EbizPassRst;if [ ! -d logs ]; then mkdir logs;  fi; aws s3 cp s3://{{S3RepoBucketName}}/scripts/EbizPassRstApp . 2>&1 > /dev/null; if [ $? -gt 0 ]; then exit 11;fi; sh EbizPassRstApp -target_inst {{EBIZEnvName}} -scope SYSADMIN'''
+    timeoutSeconds: 900
+  - name: EBIZ_Chk_PasswordChangeScope04
+    action: 'aws:branch'
+    inputs:
+      Choices:
+        - NextStep: EBIZ_RESET_CUSTOM_PASSWORD
+          Variable: '{{ PasswordChangeScope }}'
+          StringEquals: All
+        - NextStep: EBIZ_RESET_CUSTOM_PASSWORD
+          Variable: '{{ PasswordChangeScope }}'
+          StringEquals: Custom
+    description: Check the scope of password change.
+    timeoutSeconds: 600
+    nextStep: Final_Step
+  - name: EBIZ_RESET_CUSTOM_PASSWORD
+    action: 'aws:runCommand'
+    inputs:
+      DocumentName: AWS-RunShellScript
+      Targets:
+        - Key: 'tag:Name'
+          Values:
+            - '{{ EBIZAppNodeName }}'
+      CloudWatchOutputConfig:
+        CloudWatchOutputEnabled: true
+        CloudWatchLogGroupName: EBIZPassWdResetAutomationLogs
+      Parameters:
+        commands: 'runuser -l {{EBIZAppOsUser}} -c ''if [ ! -d EbizPassRst ]; then mkdir EbizPassRst; fi; cd EbizPassRst;if [ ! -d logs ]; then mkdir logs;  fi; aws s3 cp s3://{{S3RepoBucketName}}/scripts/EbizPassRstApp . 2>&1 > /dev/null; if [ $? -gt 0 ]; then exit 11;fi; sh EbizPassRstApp -target_inst {{EBIZEnvName}} -scope CUSTOM'''
+    timeoutSeconds: 900
+  - name: Final_Step
+    action: 'aws:executeScript'
+    inputs:
+      Runtime: python3.6
+      Handler: script_handler
+      Script: |-
+        def script_handler(events, context):
+          print('End Step')
+          return {'message': 'End Step'}
