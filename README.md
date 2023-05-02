@@ -28,12 +28,13 @@ AWS Managed Policies
 ```
    ReadOnlyAccess
    AmazonSSMManagedInstanceCore
+   
 ```
 Custom Managed Policy Statements with allow Effect
 ```
     "ssm:PutParameter",
     "s3:PutObject",
-    “s3:GetObject",
+    "s3:GetObject",
     "ssm:DescribeParameters",
     "ssm:GetParameter",
     "ssm:SendCommand",
@@ -41,9 +42,11 @@ Custom Managed Policy Statements with allow Effect
     "ec2:DescribeInstances",
     "ssm:GetCommandInvocation",
     "ssm:StartSession",
-    "ec2:ModifySnapshotTier",
     "ec2:DescribeAvailabilityZones",
-    "ssm:ListCommandInvocations"
+    "ssm:ListCommandInvocations",
+    "secretsmanager:GetSecretValue",
+    "secretsmanager:PutSecretValue",
+    "secretsmanager:UpdateSecret"
 ```
 - SSM Agent is installed in all the AWS EC2 instances and ability to connect to the AWS EC2 instances from cloud console. Guide to install and configure SSM Agent can be found in this link. 
 
