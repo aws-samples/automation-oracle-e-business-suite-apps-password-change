@@ -326,6 +326,9 @@ fi
 
 message "INFO: Apps password Changed for ${ENVNAME}. Moving ahead to change ALLORACLE password."
 
+##Update new apps password
+update_pwd_pst ${NEW_APPSPASS} 2 APPS
+
 ##Calling Function to Run Autoconfig
 start_autoconfig
 
