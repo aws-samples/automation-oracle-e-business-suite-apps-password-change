@@ -24,7 +24,7 @@ This sample code is a starting point for customers to understand how to build SS
 - AWS IAM Role with EC2 as use case and with the below AWS Managed IAM Policies attached and a Custom Managed IAM Policy with below policy statements and attached to all AWS EC2 instances in which the Oracle E-Business Suite is configured.
 
 
-- AWS Managed Policies
+AWS Managed Policies
 ```
    ReadOnlyAccess
    AmazonSSMManagedInstanceCore
