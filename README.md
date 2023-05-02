@@ -50,9 +50,7 @@ Custom Managed Policy Statements with allow Effect
 ```
 - SSM Agent is installed in all the AWS EC2 instances and ability to connect to the AWS EC2 instances from cloud console. Guide to install and configure SSM Agent can be found in this link. 
 
-- The automation uses two AWS System Manager Parameter stores. One string parameter store with the name ERP-apptab hold Oracle E-Business Suite environment details and another SecureString parameter store with the naming convention R12-<>CDBNAME<>-secret to hold passwords.
-
-- Create AWS Systems Manager Parameter store as standard tier and as string type with the name ERP-apptab which should store values as colon “:” delimited string in the below format in correct order as mentioned below.
+- Create AWS Systems Manager Parameter store as standard tier and as SecureString type with the name ERP-apptab which should store values as colon “:” delimited string in the below format in correct order as mentioned below.
 
 cdbname:pdbname:appnode:App Base Path
 
