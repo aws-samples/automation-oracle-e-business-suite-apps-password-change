@@ -28,7 +28,6 @@ AWS Managed Policies
 ```
    ReadOnlyAccess
    AmazonSSMManagedInstanceCore
-   
 ```
 Custom Managed Policy Statements with allow Effect
 ```
@@ -111,8 +110,8 @@ Before moving further ensure you have gone configured the Prerequisites as docum
 1. Clone the github repository and navigate to the directory.
 
 ```
-$ git clone git@ssh.gitlab.aws.dev:wwso-oracle-apps-ops-excellence/ebiz-password-reset.git
-$ cd ebiz-password-reset
+$ git clone https://github.com/aws-samples/automation-oracle-e-business-suite-apps-password-change.git
+$ cd automation-oracle-e-business-suite-apps-password-change
 ```
 2. Copy the scripts folder scripts to an AWS S3 bucket in your account that can be accessed by your AWS EC2 instances.
 
