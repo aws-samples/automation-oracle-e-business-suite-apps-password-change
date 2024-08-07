@@ -47,7 +47,7 @@ Custom Managed Policy Statements with allow Effect
     "secretsmanager:PutSecretValue",
     "secretsmanager:UpdateSecret"
 ```
-- SSM Agent is installed in all the AWS EC2 instances and ability to connect to the AWS EC2 instances from cloud console. Guide to install and configure SSM Agent can be found in this link. 
+- SSM Agent is installed in all the AWS EC2 instances and ability to connect to the AWS EC2 instances from cloud console. Guide to install and configure SSM Agent can be found in this [link](https://docs.aws.amazon.com/systems-manager/latest/userguide/manually-install-ssm-agent-linux.html). 
 
 - Create AWS Systems Manager Parameter store as standard tier and as SecureString type with the name ERP-apptab which should store values as colon “:” delimited string in the below format in correct order as mentioned below.
 
